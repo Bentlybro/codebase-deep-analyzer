@@ -1,25 +1,28 @@
 # Codebase Deep Analyzer (CDA)
 
-A systematic codebase exploration tool that thoroughly documents and understands any codebase using LLM-assisted analysis.
+Fast codebase documentation for LLMs. Analyzes entire codebases in seconds and outputs structured docs optimized for AI consumption.
 
-## Problem
+## Features
 
-When exploring a codebase, it's easy to do surface-level analysis and miss existing functionality. CDA solves this by:
-
-1. **Exhaustive discovery** — Catalogs all files by type (source, config, docs, tests)
-2. **Deep module analysis** — Uses LLM to understand each module's purpose and exports
-3. **Cross-referencing** — Maps dependencies and finds gaps
-4. **Verification** — Actually runs commands to confirm documented behavior exists
+- **Fast** — ~15 seconds for 2500+ files
+- **Single file output** — One `CODEBASE.md` that fits in LLM context
+- **Multi-language** — Rust, TypeScript, JavaScript parsing via tree-sitter
+- **Smart extraction** — Exports, imports, signatures, doc comments
+- **Architecture overview** — LLM-generated summary of the codebase
+- **JSON export** — Searchable structured data for programmatic use
 
 ## Installation
 
 ### From Release
 
 ```bash
-# Download latest release
+# Linux
 curl -L https://github.com/Bentlybro/codebase-deep-analyzer/releases/latest/download/cda-linux-x64 -o cda
 chmod +x cda
-./cda --help
+
+# macOS
+curl -L https://github.com/Bentlybro/codebase-deep-analyzer/releases/latest/download/cda-macos-x64 -o cda
+chmod +x cda
 ```
 
 ### From Source
@@ -28,85 +31,110 @@ chmod +x cda
 cargo install --path .
 ```
 
-## Usage
-
-### Analyze a Codebase
+## Quick Start
 
 ```bash
-# Full analysis with LLM assistance
-cda analyze ./my-project --output ./docs
-
-# Static analysis only (no LLM, faster)
-cda analyze ./my-project --static-only
-
-# Analyze specific module
-cda analyze ./my-project --module src/core
-
-# JSON output for programmatic use
-cda analyze ./my-project --format json
-```
-
-### Configuration
-
-```bash
-# Create config file
-cda config --init
-
-# View current config
-cda config
-```
-
-Or use environment variables:
-
-```bash
+# Set your API key (for architecture overview)
 export ANTHROPIC_API_KEY=sk-...
-export CDA_PROVIDER=anthropic
-export CDA_MODEL=claude-sonnet-4-20250514
+
+# Analyze any codebase
+cda analyze ./my-project -o ./docs
+
+# Check the output
+cat ./docs/CODEBASE.md
 ```
-
-### LLM Providers
-
-- **anthropic** — Claude (default: claude-sonnet-4-20250514)
-- **openai** — GPT-4 (default: gpt-4o)
-- **ollama** — Local models (default: llama3)
 
 ## Output
 
-CDA generates structured documentation:
+### Markdown (default)
 
+Single `CODEBASE.md` containing:
+- Architecture overview (LLM-generated)
+- Directory structure with export counts
+- All exports organized by directory
+- External dependencies
+- Internal dependency graph
+- Documentation gaps
+
+### JSON
+
+```bash
+cda analyze ./my-project -o ./docs -f json
 ```
-cda-output/
-├── index.md          # Overview with links to all modules
-├── modules/
-│   ├── core.md       # Each module documented
-│   ├── cli.md
-│   └── ...
-├── gaps.md           # Potential issues found
-└── analysis.json     # Machine-readable full analysis
+
+Outputs `analysis.json` with structured data:
+- Full module list with exports/imports
+- Searchable export index
+- Dependency mappings
+- Cross-reference data
+
+## Usage
+
+```bash
+# Standard analysis (fast, recommended)
+cda analyze ./my-project -o ./docs
+
+# JSON output for programmatic use
+cda analyze ./my-project -o ./docs -f json
+
+# Deep per-file LLM analysis (slow, use for small codebases only)
+cda analyze ./my-project -o ./docs --deep -p 8
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `-o, --output` | Output directory (default: ./cda-output) |
+| `-f, --format` | Output format: markdown, json |
+| `-m, --module` | Analyze specific module/directory |
+| `--deep` | Enable slow per-file LLM analysis |
+| `-p, --parallelism` | Workers for --deep mode (default: 4) |
+| `-v, --verbose` | Verbose logging |
+
+### LLM Providers
+
+```bash
+# Anthropic (default)
+export ANTHROPIC_API_KEY=sk-...
+
+# OpenAI
+export OPENAI_API_KEY=sk-...
+cda analyze ./project --provider openai
+
+# Ollama (local)
+cda analyze ./project --provider ollama
 ```
 
 ## How It Works
 
-### Phase 1: Discovery
-- Walk the codebase respecting `.gitignore`
-- Categorize files: source, config, docs, tests
-- Identify entry points and exports
+1. **Discovery** — Walks codebase respecting `.gitignore`
+2. **Parsing** — Tree-sitter extracts exports, imports, signatures, doc comments
+3. **Architecture** — One LLM call generates high-level overview
+4. **Output** — Structured docs optimized for LLM consumption
 
-### Phase 2: Module Analysis
-- Parse each source file with tree-sitter
-- Use LLM to understand purpose and behavior
-- Extract all exports with signatures
+## Example Output
 
-### Phase 3: Cross-Reference
-- Map module dependencies
-- Find unused exports (dead code)
-- Identify untested functions
-- Flag undocumented commands
+```markdown
+# Codebase Documentation
 
-### Phase 4: Output
-- Generate structured markdown docs
-- Create searchable JSON export
-- List gaps and recommendations
+## Architecture
+This TypeScript application is a multi-channel AI agent platform...
+
+## Directory Structure
+- `/src/agents` — 109 files, 466 exports
+- `/src/channels` — 17 files, 75 exports
+...
+
+## Module Reference
+
+### `/src/agents`
+
+#### session.ts
+- `createSession(config: SessionConfig): Session`
+- `destroySession(id: string): void`
+...
+```
 
 ## License
 
