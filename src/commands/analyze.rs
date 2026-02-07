@@ -13,7 +13,7 @@ pub struct AnalyzeArgs {
     pub provider: String,
     pub model: Option<String>,
     pub parallelism: usize,
-    pub static_only: bool,
+    pub deep: bool,  // Per-file LLM analysis (slow)
     pub format: Format,
 }
 
@@ -54,23 +54,10 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
     analysis_pb.set_style(spinner_style.clone());
     analysis_pb.set_prefix("[2/4]");
 
-    let analysis = if args.static_only {
-        analysis_pb.set_message("Analyzing modules (static only)...");
-        analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
-        debug!("Running static analysis only (--static-only)");
-        let result = analyzer::analyze_static(&inventory).await?;
-
-        analysis_pb.finish_with_message(format!(
-            "Analyzed {} modules, found {} exports (static)",
-            result.modules.len(),
-            result.total_exports()
-        ));
-
-        result
-    } else {
+    // Default: fast static analysis. --deep enables slow per-file LLM analysis
+    let analysis = if args.deep {
         analysis_pb.set_message(format!(
-            "Analyzing modules with {} LLM (streaming to disk)...",
+            "Deep analysis with {} LLM (streaming to disk)...",
             args.provider
         ));
         analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -95,6 +82,20 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
         ));
 
         result
+    } else {
+        analysis_pb.set_message("Analyzing modules (fast static analysis)...");
+        analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        debug!("Running fast static analysis (use --deep for per-file LLM)");
+        let result = analyzer::analyze_static(&inventory).await?;
+
+        analysis_pb.finish_with_message(format!(
+            "Analyzed {} modules, found {} exports",
+            result.modules.len(),
+            result.total_exports()
+        ));
+
+        result
     };
 
     // Phase 3: Cross-reference
@@ -104,12 +105,9 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
     crossref_pb.set_message("Cross-referencing...");
     crossref_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let crossref = if args.static_only {
-        analyzer::cross_reference(&analysis).await?
-    } else {
-        let provider = crate::llm::get_provider(&args.provider, args.model.as_deref())?;
-        analyzer::cross_reference_with_llm(&analysis, provider.as_ref()).await?
-    };
+    // Always generate architecture overview with LLM (one quick call)
+    let provider = crate::llm::get_provider(&args.provider, args.model.as_deref())?;
+    let crossref = analyzer::cross_reference_with_llm(&analysis, provider.as_ref()).await?;
 
     let arch_status = if crossref.architecture_overview.is_some() {
         " + architecture overview"

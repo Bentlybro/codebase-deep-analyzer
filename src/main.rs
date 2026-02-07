@@ -56,9 +56,9 @@ enum Commands {
         #[arg(short, long, default_value = "4")]
         parallelism: usize,
 
-        /// Skip LLM analysis (static analysis only)
+        /// Enable per-file LLM analysis (slow, use for small codebases)
         #[arg(long)]
-        static_only: bool,
+        deep: bool,
     },
 
     /// Verify that documentation matches actual codebase behavior
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
             provider,
             model,
             parallelism,
-            static_only,
+            deep,
         } => {
             commands::analyze::run(commands::analyze::AnalyzeArgs {
                 path,
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
                 provider,
                 model,
                 parallelism,
-                static_only,
+                deep,
                 format: cli.format,
             })
             .await?;
