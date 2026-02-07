@@ -1,8 +1,12 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Semaphore;
+use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use super::discovery::{FileInventory, Language, SourceFile};
@@ -28,9 +32,7 @@ pub struct ModuleAnalysis {
     pub language: Language,
     pub exports: Vec<Export>,
     pub imports: Vec<Import>,
-    /// Brief summary of what this module does
     pub summary: String,
-    /// Whether deep analysis was written to disk
     pub has_deep_analysis: bool,
 }
 
@@ -65,7 +67,7 @@ impl std::fmt::Display for ExportKind {
             ExportKind::Type => write!(f, "type"),
             ExportKind::Const => write!(f, "const"),
             ExportKind::Enum => write!(f, "enum"),
-            ExportKind::Trait => write!(f, "trait"),
+            ExportKind::Trait => write!(f, "trait/interface"),
             ExportKind::Struct => write!(f, "struct"),
             ExportKind::Module => write!(f, "mod"),
         }
@@ -83,13 +85,9 @@ pub struct Import {
 /// Cross-reference analysis
 #[derive(Debug, Default)]
 pub struct CrossReference {
-    /// Module dependencies: who imports what
     pub dependencies: HashMap<String, Vec<String>>,
-    /// Potential gaps or issues found
     pub gaps: Vec<Gap>,
-    /// External dependencies used
     pub external_deps: Vec<String>,
-    /// LLM-generated architecture overview
     pub architecture_overview: Option<String>,
 }
 
@@ -122,7 +120,6 @@ pub async fn analyze_static(inventory: &FileInventory) -> Result<Analysis> {
     for file in &inventory.source_files {
         debug!("Parsing: {}", file.path);
 
-        // Read file content
         let content = match fs::read_to_string(&file.path) {
             Ok(c) => c,
             Err(e) => {
@@ -131,7 +128,6 @@ pub async fn analyze_static(inventory: &FileInventory) -> Result<Analysis> {
             }
         };
 
-        // Parse with tree-sitter
         let parse_result = match parser::parse_file(&content, file.language) {
             Ok(r) => r,
             Err(e) => {
@@ -166,123 +162,251 @@ pub async fn analyze_static(inventory: &FileInventory) -> Result<Analysis> {
     Ok(analysis)
 }
 
-/// Run full analysis with LLM assistance - streams output to disk
+/// Load completed files from progress file
+fn load_progress(output_path: &Path) -> HashSet<String> {
+    let progress_file = output_path.join(".cda-progress");
+    let mut completed = HashSet::new();
+
+    if let Ok(file) = File::open(&progress_file) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().map_while(Result::ok) {
+            completed.insert(line);
+        }
+        info!("Resuming: {} files already completed", completed.len());
+    }
+
+    completed
+}
+
+/// Save completed file to progress
+fn save_progress(output_path: &Path, file_path: &str) -> Result<()> {
+    let progress_file = output_path.join(".cda-progress");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(progress_file)?;
+    writeln!(file, "{}", file_path)?;
+    Ok(())
+}
+
+/// Run full analysis with LLM assistance - streams output to disk with resume support
 pub async fn analyze_streaming(
     inventory: &FileInventory,
     provider: &dyn LlmProvider,
     output_path: &Path,
-    _parallelism: usize,
+    parallelism: usize,
 ) -> Result<Analysis> {
     info!(
-        "Running streaming LLM analysis on {} source files",
-        inventory.source_files.len()
+        "Running streaming LLM analysis on {} source files (parallelism: {})",
+        inventory.source_files.len(),
+        parallelism
     );
 
     // Create modules directory upfront
     let modules_dir = output_path.join("modules");
     fs::create_dir_all(&modules_dir)?;
 
+    // Load progress for resume capability
+    let completed = load_progress(output_path);
+    let remaining: Vec<&SourceFile> = inventory
+        .source_files
+        .iter()
+        .filter(|f| !completed.contains(&f.path))
+        .collect();
+
+    info!(
+        "Files to process: {} (skipping {} already done)",
+        remaining.len(),
+        completed.len()
+    );
+
     let mut analysis = Analysis::default();
-    let total_files = inventory.source_files.len();
+    let total_files = remaining.len();
 
-    for (idx, file) in inventory.source_files.iter().enumerate() {
-        info!("[{}/{}] Analyzing: {}", idx + 1, total_files, file.path);
+    // Process files with concurrency control
+    let semaphore = Arc::new(Semaphore::new(parallelism));
+    let provider = Arc::new(provider);
+    let modules_dir = Arc::new(modules_dir);
+    let output_path = Arc::new(output_path.to_path_buf());
 
-        // Analyze single file and stream to disk
-        let module = analyze_single_file_streaming(file, provider, &modules_dir).await?;
-        analysis.modules.push(module);
+    // Process in batches for better progress reporting
+    for (batch_idx, batch) in remaining.chunks(parallelism).enumerate() {
+        let batch_start = batch_idx * parallelism;
+        
+        let mut handles = Vec::new();
 
-        // Memory hint to the allocator
-        #[cfg(unix)]
-        unsafe {
-            libc::malloc_trim(0);
+        for (idx, file) in batch.iter().enumerate() {
+            let file_idx = batch_start + idx + 1 + completed.len();
+            let total = total_files + completed.len();
+            
+            info!("[{}/{}] Analyzing: {}", file_idx, total, file.path);
+
+            let semaphore = Arc::clone(&semaphore);
+            let modules_dir = Arc::clone(&modules_dir);
+            let output_path = Arc::clone(&output_path);
+            let file_path = file.path.clone();
+            let file_language = file.language;
+
+            // Read file content before spawning
+            let content = match fs::read_to_string(&file.path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Failed to read {}: {}", file.path, e);
+                    analysis.modules.push(ModuleAnalysis {
+                        path: file.path.clone(),
+                        language: file.language,
+                        exports: vec![],
+                        imports: vec![],
+                        summary: format!("Failed to read: {}", e),
+                        has_deep_analysis: false,
+                    });
+                    continue;
+                }
+            };
+
+            let handle = tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+
+                // Parse with tree-sitter
+                let parse_result = match parser::parse_file(&content, file_language) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("Failed to parse {}: {}", file_path, e);
+                        parser::ParseResult {
+                            exports: vec![],
+                            imports: vec![],
+                        }
+                    }
+                };
+
+                // Build static context
+                let static_context = build_static_context_from_parse(&file_path, &parse_result);
+
+                // Get LLM analysis (skip very large files)
+                let (summary, has_deep) = if content.len() > 100_000 {
+                    warn!("Skipping LLM analysis for {} (file too large: {} bytes)", file_path, content.len());
+                    (
+                        format!("{:?} file with {} exports (too large for LLM)", file_language, parse_result.exports.len()),
+                        false,
+                    )
+                } else {
+                    match analyze_module_with_llm_retry(&file_path, &content, &static_context, 3).await {
+                        Ok(deep) => {
+                            let summary = deep.lines().next().unwrap_or("").to_string();
+                            
+                            // Write module markdown immediately
+                            let safe_name = file_path.replace(['/', '.'], "_");
+                            let module_path = modules_dir.join(format!("{}.md", safe_name));
+                            
+                            if let Err(e) = write_module_markdown(
+                                &module_path,
+                                &file_path,
+                                file_language,
+                                &parse_result,
+                                Some(&deep),
+                            ) {
+                                warn!("Failed to write {}: {}", module_path.display(), e);
+                            }
+
+                            // Save progress
+                            if let Err(e) = save_progress(&output_path, &file_path) {
+                                warn!("Failed to save progress: {}", e);
+                            }
+
+                            (summary, true)
+                        }
+                        Err(e) => {
+                            warn!("LLM analysis failed for {}: {}", file_path, e);
+                            
+                            // Still write static analysis
+                            let safe_name = file_path.replace(['/', '.'], "_");
+                            let module_path = modules_dir.join(format!("{}.md", safe_name));
+                            let _ = write_module_markdown(
+                                &module_path,
+                                &file_path,
+                                file_language,
+                                &parse_result,
+                                None,
+                            );
+                            let _ = save_progress(&output_path, &file_path);
+
+                            (
+                                format!("{:?} file with {} exports", file_language, parse_result.exports.len()),
+                                false,
+                            )
+                        }
+                    }
+                };
+
+                ModuleAnalysis {
+                    path: file_path,
+                    language: file_language,
+                    exports: parse_result.exports,
+                    imports: parse_result.imports,
+                    summary,
+                    has_deep_analysis: has_deep,
+                }
+            });
+
+            handles.push(handle);
         }
+
+        // Wait for batch to complete
+        for handle in handles {
+            match handle.await {
+                Ok(module) => analysis.modules.push(module),
+                Err(e) => warn!("Task failed: {}", e),
+            }
+        }
+    }
+
+    // Add already-completed modules (from resume)
+    for path in &completed {
+        analysis.modules.push(ModuleAnalysis {
+            path: path.clone(),
+            language: Language::Unknown,
+            exports: vec![],
+            imports: vec![],
+            summary: "(previously analyzed)".to_string(),
+            has_deep_analysis: true,
+        });
     }
 
     Ok(analysis)
 }
 
-/// Analyze a single file and write output immediately
-async fn analyze_single_file_streaming(
-    file: &SourceFile,
-    provider: &dyn LlmProvider,
-    modules_dir: &Path,
-) -> Result<ModuleAnalysis> {
-    // Read file content
-    let content = match fs::read_to_string(&file.path) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Failed to read {}: {}", file.path, e);
-            return Ok(ModuleAnalysis {
-                path: file.path.clone(),
-                language: file.language,
-                exports: vec![],
-                imports: vec![],
-                summary: format!("Failed to read: {}", e),
-                has_deep_analysis: false,
-            });
+/// Analyze module with LLM with retry logic
+async fn analyze_module_with_llm_retry(
+    path: &str,
+    content: &str,
+    static_context: &str,
+    max_retries: usize,
+) -> Result<String> {
+    let mut last_error = None;
+
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            // Exponential backoff
+            let delay = Duration::from_secs(2u64.pow(attempt as u32));
+            info!("Retry {} for {} after {:?}", attempt + 1, path, delay);
+            sleep(delay).await;
         }
-    };
 
-    // Parse with tree-sitter
-    let parse_result = match parser::parse_file(&content, file.language) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Failed to parse {}: {}", file.path, e);
-            parser::ParseResult {
-                exports: vec![],
-                imports: vec![],
-            }
-        }
-    };
-
-    // Build static context
-    let static_context = build_static_context_from_parse(&file.path, &parse_result);
-
-    // Get LLM analysis (skip very large files)
-    let (summary, deep_analysis) = if content.len() > 50_000 {
-        warn!("Skipping LLM analysis for {} (file too large)", file.path);
-        (
-            format!("{:?} file (too large for LLM analysis)", file.language),
-            None,
-        )
-    } else {
-        match analyze_module_with_llm(provider, &file.path, &content, &static_context).await {
-            Ok(deep) => {
-                let summary = deep.lines().next().unwrap_or("").to_string();
-                (summary, Some(deep))
-            }
+        match analyze_module_with_llm(path, content, static_context).await {
+            Ok(result) => return Ok(result),
             Err(e) => {
-                warn!("LLM analysis failed for {}: {}", file.path, e);
-                (
-                    format!("{:?} file with {} exports", file.language, parse_result.exports.len()),
-                    None,
-                )
+                let err_str = e.to_string();
+                if err_str.contains("rate_limit") || err_str.contains("overloaded") {
+                    warn!("Rate limited, will retry: {}", path);
+                    last_error = Some(e);
+                    continue;
+                }
+                return Err(e);
             }
         }
-    };
+    }
 
-    // Write module markdown immediately
-    let safe_name = file.path.replace(['/', '.'], "_");
-    let module_path = modules_dir.join(format!("{}.md", safe_name));
-    
-    write_module_markdown(
-        &module_path,
-        &file.path,
-        file.language,
-        &parse_result,
-        deep_analysis.as_deref(),
-    )?;
-
-    // Return lightweight analysis (no deep_analysis in memory)
-    Ok(ModuleAnalysis {
-        path: file.path.clone(),
-        language: file.language,
-        exports: parse_result.exports,
-        imports: parse_result.imports,
-        summary,
-        has_deep_analysis: deep_analysis.is_some(),
-    })
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Max retries exceeded")))
 }
 
 /// Write module markdown to disk immediately
@@ -294,7 +418,7 @@ fn write_module_markdown(
     deep_analysis: Option<&str>,
 ) -> Result<()> {
     let mut file = File::create(path)?;
-    
+
     let module_name = Path::new(file_path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -304,13 +428,11 @@ fn write_module_markdown(
     writeln!(file, "**Path:** `{}`\n", file_path)?;
     writeln!(file, "**Language:** {:?}\n", language)?;
 
-    // Deep analysis (if available)
     if let Some(deep) = deep_analysis {
         writeln!(file, "## Analysis\n")?;
         writeln!(file, "{}\n", deep)?;
     }
 
-    // Exports table
     if !parse_result.exports.is_empty() {
         writeln!(file, "## Exports\n")?;
         writeln!(file, "| Name | Kind | Line | Description |")?;
@@ -329,15 +451,18 @@ fn write_module_markdown(
             )?;
         }
 
-        // Detailed exports
         writeln!(file, "\n## Export Details\n")?;
 
         for export in &parse_result.exports {
             writeln!(file, "### `{}`\n", export.name)?;
-            writeln!(file, "**Kind:** {} | **Line:** {}\n", export.kind, export.line_number)?;
+            writeln!(
+                file,
+                "**Kind:** {} | **Line:** {}\n",
+                export.kind, export.line_number
+            )?;
 
             if let Some(sig) = &export.signature {
-                writeln!(file, "```rust\n{}\n```\n", sig)?;
+                writeln!(file, "```\n{}\n```\n", sig)?;
             }
 
             if !export.description.is_empty() {
@@ -346,12 +471,19 @@ fn write_module_markdown(
         }
     }
 
-    // Imports
     if !parse_result.imports.is_empty() {
         writeln!(file, "## Dependencies\n")?;
 
-        let external: Vec<_> = parse_result.imports.iter().filter(|i| i.is_external).collect();
-        let internal: Vec<_> = parse_result.imports.iter().filter(|i| !i.is_external).collect();
+        let external: Vec<_> = parse_result
+            .imports
+            .iter()
+            .filter(|i| i.is_external)
+            .collect();
+        let internal: Vec<_> = parse_result
+            .imports
+            .iter()
+            .filter(|i| !i.is_external)
+            .collect();
 
         if !external.is_empty() {
             writeln!(file, "### External\n")?;
@@ -397,7 +529,11 @@ fn build_static_context_from_parse(path: &str, parse_result: &parser::ParseResul
     if !parse_result.imports.is_empty() {
         ctx.push_str("### Dependencies\n");
         for import in &parse_result.imports {
-            let ext = if import.is_external { " (external)" } else { "" };
+            let ext = if import.is_external {
+                " (external)"
+            } else {
+                ""
+            };
             ctx.push_str(&format!("- `{}`{}\n", import.source, ext));
         }
         ctx.push('\n');
@@ -407,61 +543,66 @@ fn build_static_context_from_parse(path: &str, parse_result: &parser::ParseResul
 }
 
 /// Analyze a single module with LLM
-async fn analyze_module_with_llm(
-    provider: &dyn LlmProvider,
-    path: &str,
-    content: &str,
-    static_context: &str,
-) -> Result<String> {
+async fn analyze_module_with_llm(path: &str, content: &str, static_context: &str) -> Result<String> {
     let filename = std::path::Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(path);
 
-    let system_prompt = r#"You are a code analysis expert. Your job is to analyze source code and produce clear, structured documentation that helps other developers (and AI assistants) understand the codebase.
+    // Get API key from environment
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
 
-For each module, provide:
+    let system_prompt = r#"You are a code analysis expert. Analyze the source code and produce clear documentation.
+
+Provide:
 1. **Purpose**: One sentence explaining what this module does
-2. **Key Components**: Brief description of each important function/type
-3. **Data Flow**: How data moves through this module
-4. **Dependencies**: What this module relies on and why
-5. **Usage**: How other code would use this module
+2. **Key Components**: Brief description of important functions/types (max 5)
+3. **Usage**: How other code would use this module
 
-Be concise but thorough. Focus on INTENT and BEHAVIOR, not just listing code.
-Output in markdown format. Keep response under 2000 tokens."#;
+Be concise. Max 500 words. Output in markdown."#;
 
     let user_prompt = format!(
-        r#"Analyze this source file: `{}`
-
-{}
-
-## Source Code
-
-```
-{}
-```
-
-Provide a deep analysis of this module."#,
-        filename, static_context, content
+        "Analyze `{}`:\n\n{}\n\n```\n{}\n```",
+        filename,
+        static_context,
+        // Truncate very long files
+        if content.len() > 30000 {
+            &content[..30000]
+        } else {
+            content
+        }
     );
 
-    let messages = vec![
-        Message {
-            role: Role::System,
-            content: system_prompt.to_string(),
-        },
-        Message {
-            role: Role::User,
-            content: user_prompt,
-        },
-    ];
+    let client = reqwest::Client::new();
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": format!("{}\n\n{}", system_prompt, user_prompt)}
+            ]
+        }))
+        .send()
+        .await?;
 
-    let config = LlmConfig {
-        max_tokens: 2048,
-        temperature: 0.0,
-    };
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await?;
+        anyhow::bail!("Anthropic API error {}: {}", status, body);
+    }
 
-    provider.complete(messages, config).await
+    let json: serde_json::Value = response.json().await?;
+    let text = json["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    Ok(text)
 }
 
 /// Cross-reference modules to find dependencies and gaps
@@ -470,17 +611,15 @@ pub async fn cross_reference(analysis: &Analysis) -> Result<CrossReference> {
 
     let mut crossref = CrossReference::default();
     let mut all_exports: HashMap<String, String> = HashMap::new();
-    let mut used_exports: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut external_deps: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut used_exports: HashSet<String> = HashSet::new();
+    let mut external_deps: HashSet<String> = HashSet::new();
 
-    // Build export map
     for module in &analysis.modules {
         for export in &module.exports {
             all_exports.insert(export.name.clone(), module.path.clone());
         }
     }
 
-    // Build dependency map and track usage
     for module in &analysis.modules {
         let mut deps = Vec::new();
 
@@ -502,7 +641,6 @@ pub async fn cross_reference(analysis: &Analysis) -> Result<CrossReference> {
         crossref.dependencies.insert(module.path.clone(), deps);
     }
 
-    // Find gaps
     for module in &analysis.modules {
         for export in &module.exports {
             if export.name == "main" || export.name.contains("test") {
@@ -531,59 +669,74 @@ pub async fn cross_reference(analysis: &Analysis) -> Result<CrossReference> {
 /// Cross-reference with LLM to generate architecture overview
 pub async fn cross_reference_with_llm(
     analysis: &Analysis,
-    provider: &dyn LlmProvider,
+    _provider: &dyn LlmProvider,
 ) -> Result<CrossReference> {
     let mut crossref = cross_reference(analysis).await?;
 
     // Build a summary of all modules for the LLM
     let mut modules_summary = String::new();
+    let mut count = 0;
     for module in &analysis.modules {
+        if count >= 50 {
+            modules_summary.push_str("\n... and more modules\n");
+            break;
+        }
         let filename = std::path::Path::new(&module.path)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(&module.path);
 
-        modules_summary.push_str(&format!("### {}\n", filename));
-        modules_summary.push_str(&module.summary);
-        modules_summary.push_str("\n\n");
+        modules_summary.push_str(&format!("- **{}**: {}\n", filename, module.summary));
+        count += 1;
     }
 
     // Generate architecture overview
-    let system_prompt = r#"You are a software architect. Analyze the module summaries and produce a high-level architecture overview.
+    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(k) => k,
+        Err(_) => {
+            warn!("ANTHROPIC_API_KEY not set, skipping architecture overview");
+            return Ok(crossref);
+        }
+    };
 
-Include:
-1. **System Purpose**: What does this codebase do overall?
-2. **Core Components**: The main modules and their roles
-3. **Data Flow**: How data moves through the system
-4. **Entry Points**: Where does execution start?
-5. **Extension Points**: Where can the system be extended?
+    let prompt = format!(
+        r#"Based on these modules, write a brief architecture overview (max 300 words):
 
-Be concise. Write for developers who need to understand the codebase quickly."#;
+{}
 
-    let user_prompt = format!(
-        "Here are the analyzed modules:\n\n{}\n\nGenerate an architecture overview.",
+Include: System purpose, core components, data flow, entry points."#,
         modules_summary
     );
 
-    let messages = vec![
-        Message {
-            role: Role::System,
-            content: system_prompt.to_string(),
-        },
-        Message {
-            role: Role::User,
-            content: user_prompt,
-        },
-    ];
+    let client = reqwest::Client::new();
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ]
+        }))
+        .send()
+        .await;
 
-    let config = LlmConfig {
-        max_tokens: 2048,
-        temperature: 0.0,
-    };
-
-    match provider.complete(messages, config).await {
-        Ok(overview) => {
-            crossref.architecture_overview = Some(overview);
+    match response {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(text) = json["content"][0]["text"].as_str() {
+                    crossref.architecture_overview = Some(text.to_string());
+                }
+            }
+        }
+        Ok(resp) => {
+            warn!(
+                "Failed to generate architecture overview: {}",
+                resp.status()
+            );
         }
         Err(e) => {
             warn!("Failed to generate architecture overview: {}", e);
@@ -648,6 +801,6 @@ mod tests {
     fn test_export_kind_display() {
         assert_eq!(format!("{}", ExportKind::Function), "fn");
         assert_eq!(format!("{}", ExportKind::Struct), "struct");
-        assert_eq!(format!("{}", ExportKind::Trait), "trait");
+        assert_eq!(format!("{}", ExportKind::Trait), "trait/interface");
     }
 }
