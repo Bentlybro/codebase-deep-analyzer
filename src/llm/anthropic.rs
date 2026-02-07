@@ -7,8 +7,10 @@ use std::env;
 use super::{LlmConfig, LlmProvider, Message, Role};
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+#[allow(dead_code)]
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
+#[allow(dead_code)]
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
@@ -28,6 +30,7 @@ impl AnthropicProvider {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct ApiRequest {
     model: String,
@@ -38,17 +41,20 @@ struct ApiRequest {
     temperature: f32,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct ApiMessage {
     role: String,
     content: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct ApiResponse {
     content: Vec<ContentBlock>,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct ContentBlock {
     text: String,

@@ -6,9 +6,12 @@ use std::env;
 
 use super::{LlmConfig, LlmProvider, Message, Role};
 
+#[allow(dead_code)]
 const DEFAULT_MODEL: &str = "gpt-4o";
+#[allow(dead_code)]
 const API_URL: &str = "https://api.openai.com/v1/chat/completions";
 
+#[allow(dead_code)]
 pub struct OpenAiProvider {
     client: Client,
     api_key: String,
@@ -28,6 +31,7 @@ impl OpenAiProvider {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct ApiRequest {
     model: String,
@@ -36,22 +40,26 @@ struct ApiRequest {
     temperature: f32,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct ApiMessage {
     role: String,
     content: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct ApiResponse {
     choices: Vec<Choice>,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct Choice {
     message: ChoiceMessage,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct ChoiceMessage {
     content: String,

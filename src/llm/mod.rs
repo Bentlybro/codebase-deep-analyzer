@@ -11,6 +11,7 @@ pub use openai::OpenAiProvider;
 
 /// Message for LLM conversation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Message {
     pub role: Role,
     pub content: String,
@@ -26,6 +27,7 @@ pub enum Role {
 
 /// Configuration for LLM request
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LlmConfig {
     pub max_tokens: usize,
     pub temperature: f32,
@@ -42,9 +44,9 @@ impl Default for LlmConfig {
 
 /// Trait for LLM providers
 #[async_trait]
+#[allow(dead_code)]
 pub trait LlmProvider: Send + Sync {
     /// Get the provider name
-    #[allow(dead_code)]
     fn name(&self) -> &str;
 
     /// Send a message and get a response

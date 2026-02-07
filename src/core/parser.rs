@@ -187,13 +187,13 @@ fn parse_rust(content: &str) -> Result<ParseResult> {
 fn parse_js_ts(content: &str, lang: Language) -> Result<ParseResult> {
     let mut parser = Parser::new();
 
-    let ts_lang = if lang == Language::TypeScript {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT
+    let ts_lang: tree_sitter::Language = if lang == Language::TypeScript {
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
     } else {
         tree_sitter_javascript::LANGUAGE.into()
     };
 
-    parser.set_language(&ts_lang.into())?;
+    parser.set_language(&ts_lang)?;
 
     let tree = parser
         .parse(content, None)
@@ -398,9 +398,10 @@ pub fn extract_doc_comment(content: &str, line: usize) -> Option<String> {
         if trimmed.starts_with("///") {
             doc_lines.push(trimmed.trim_start_matches("///").trim());
             current -= 1;
-        } else if trimmed.starts_with("//!") || trimmed.starts_with("#[") {
-            current -= 1;
-        } else if trimmed.is_empty() && !doc_lines.is_empty() {
+        } else if trimmed.starts_with("//!")
+            || trimmed.starts_with("#[")
+            || (trimmed.is_empty() && !doc_lines.is_empty())
+        {
             current -= 1;
         } else {
             break;

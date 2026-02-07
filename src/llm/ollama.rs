@@ -6,9 +6,12 @@ use std::env;
 
 use super::{LlmConfig, LlmProvider, Message, Role};
 
+#[allow(dead_code)]
 const DEFAULT_MODEL: &str = "llama3";
+#[allow(dead_code)]
 const DEFAULT_URL: &str = "http://localhost:11434";
 
+#[allow(dead_code)]
 pub struct OllamaProvider {
     client: Client,
     base_url: String,
@@ -27,6 +30,7 @@ impl OllamaProvider {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct ApiRequest {
     model: String,
@@ -35,23 +39,27 @@ struct ApiRequest {
     options: Options,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct Options {
     num_predict: usize,
     temperature: f32,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct ApiMessage {
     role: String,
     content: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct ApiResponse {
     message: ResponseMessage,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct ResponseMessage {
     content: String,

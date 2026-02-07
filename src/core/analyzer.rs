@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use super::discovery::{FileInventory, Language, SourceFile};
 use super::parser;
-use crate::llm::{LlmConfig, LlmProvider, Message, Role};
+use crate::llm::LlmProvider;
 
 /// Result of analyzing a codebase - lightweight version for cross-referencing
 #[derive(Debug, Default)]
@@ -225,7 +225,7 @@ pub async fn analyze_streaming(
 
     // Process files with concurrency control
     let semaphore = Arc::new(Semaphore::new(parallelism));
-    let provider = Arc::new(provider);
+    let _provider = Arc::new(provider); // LLM calls done directly in tasks
     let modules_dir = Arc::new(modules_dir);
     let output_path = Arc::new(output_path.to_path_buf());
 
@@ -693,8 +693,7 @@ pub async fn cross_reference_with_llm(
 
     // Build a summary of all modules for the LLM
     let mut modules_summary = String::new();
-    let mut count = 0;
-    for module in &analysis.modules {
+    for (count, module) in analysis.modules.iter().enumerate() {
         if count >= 50 {
             modules_summary.push_str("\n... and more modules\n");
             break;
@@ -705,7 +704,6 @@ pub async fn cross_reference_with_llm(
             .unwrap_or(&module.path);
 
         modules_summary.push_str(&format!("- **{}**: {}\n", filename, module.summary));
-        count += 1;
     }
 
     // Generate architecture overview
