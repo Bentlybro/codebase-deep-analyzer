@@ -20,7 +20,7 @@ pub struct SourceFile {
     pub size: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Language {
     Rust,
     TypeScript,
@@ -33,6 +33,7 @@ pub enum Language {
     C,
     Ruby,
     Shell,
+    #[default]
     Unknown,
 }
 

@@ -31,7 +31,7 @@ walkdir = "2"
 ignore = "0.4"  # Respects .gitignore
 
 # Code parsing
-tree-sitter = "0.24"
+tree-sitter = "0.25"
 
 # Progress bars and CLI output
 indicatif = "0.17"
@@ -53,6 +53,8 @@ async-trait = "0.1"
 # Config file support
 directories = "6"
 toml = "0.8"
+tree-sitter-rust = "0.24.0"
+streaming-iterator = "0.1.9"
 
 [dev-dependencies]
 tempfile = "3"
