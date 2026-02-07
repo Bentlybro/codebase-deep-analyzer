@@ -13,14 +13,14 @@ pub struct AnalyzeArgs {
     pub provider: String,
     pub model: Option<String>,
     pub parallelism: usize,
-    pub deep: bool,  // Per-file LLM analysis (slow)
+    pub deep: bool, // Per-file LLM analysis (slow)
     pub format: Format,
 }
 
 pub async fn run(args: AnalyzeArgs) -> Result<()> {
     let path = Path::new(&args.path).canonicalize()?;
     let output_path = Path::new(&args.output);
-    
+
     info!("Analyzing codebase at: {}", path.display());
     info!("Output directory: {}", output_path.display());
 
@@ -63,7 +63,7 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
         analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         let provider = crate::llm::get_provider(&args.provider, args.model.as_deref())?;
-        
+
         // Use streaming analysis - writes each module to disk immediately
         let result = analyzer::analyze_streaming(
             &inventory,
@@ -73,7 +73,11 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
         )
         .await?;
 
-        let llm_count = result.modules.iter().filter(|m| m.has_deep_analysis).count();
+        let llm_count = result
+            .modules
+            .iter()
+            .filter(|m| m.has_deep_analysis)
+            .count();
         analysis_pb.finish_with_message(format!(
             "Analyzed {} modules ({} with LLM), found {} exports",
             result.modules.len(),

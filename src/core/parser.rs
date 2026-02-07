@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Parser, Query, QueryCursor, Node};
+use tree_sitter::{Node, Parser, Query, QueryCursor};
 
 use super::analyzer::{Export, ExportKind, Import};
 use super::discovery::Language;
@@ -186,13 +186,13 @@ fn parse_rust(content: &str) -> Result<ParseResult> {
 /// Parse TypeScript/JavaScript using AST walking
 fn parse_js_ts(content: &str, lang: Language) -> Result<ParseResult> {
     let mut parser = Parser::new();
-    
+
     let ts_lang = if lang == Language::TypeScript {
         tree_sitter_typescript::LANGUAGE_TYPESCRIPT
     } else {
         tree_sitter_javascript::LANGUAGE.into()
     };
-    
+
     parser.set_language(&ts_lang.into())?;
 
     let tree = parser
@@ -204,7 +204,13 @@ fn parse_js_ts(content: &str, lang: Language) -> Result<ParseResult> {
     let lines: Vec<&str> = content.lines().collect();
 
     // Walk the AST to find exports and imports
-    walk_node(tree.root_node(), content, &lines, &mut exports, &mut imports);
+    walk_node(
+        tree.root_node(),
+        content,
+        &lines,
+        &mut exports,
+        &mut imports,
+    );
 
     Ok(ParseResult { exports, imports })
 }
@@ -243,18 +249,20 @@ fn walk_node(
 /// Extract export info from an export_statement node
 fn extract_export_from_node(node: Node, content: &str, lines: &[&str]) -> Option<Export> {
     let mut cursor = node.walk();
-    
+
     for child in node.children(&mut cursor) {
         let child_kind = child.kind();
-        
+
         match child_kind {
             "function_declaration" | "function" => {
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let name = name_node.utf8_text(content.as_bytes()).ok()?;
                     let line = name_node.start_position().row + 1;
-                    let sig = lines.get(node.start_position().row).map(|s| s.trim().to_string());
+                    let sig = lines
+                        .get(node.start_position().row)
+                        .map(|s| s.trim().to_string());
                     let desc = extract_jsdoc_comment(content, line);
-                    
+
                     return Some(Export {
                         name: name.to_string(),
                         kind: ExportKind::Function,
@@ -269,7 +277,7 @@ fn extract_export_from_node(node: Node, content: &str, lines: &[&str]) -> Option
                     let name = name_node.utf8_text(content.as_bytes()).ok()?;
                     let line = name_node.start_position().row + 1;
                     let desc = extract_jsdoc_comment(content, line);
-                    
+
                     return Some(Export {
                         name: name.to_string(),
                         kind: ExportKind::Class,
@@ -288,7 +296,7 @@ fn extract_export_from_node(node: Node, content: &str, lines: &[&str]) -> Option
                             let name = name_node.utf8_text(content.as_bytes()).ok()?;
                             let line = name_node.start_position().row + 1;
                             let desc = extract_jsdoc_comment(content, line);
-                            
+
                             return Some(Export {
                                 name: name.to_string(),
                                 kind: ExportKind::Const,
@@ -304,7 +312,7 @@ fn extract_export_from_node(node: Node, content: &str, lines: &[&str]) -> Option
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let name = name_node.utf8_text(content.as_bytes()).ok()?;
                     let line = name_node.start_position().row + 1;
-                    
+
                     return Some(Export {
                         name: name.to_string(),
                         kind: ExportKind::Type,
@@ -318,7 +326,7 @@ fn extract_export_from_node(node: Node, content: &str, lines: &[&str]) -> Option
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let name = name_node.utf8_text(content.as_bytes()).ok()?;
                     let line = name_node.start_position().row + 1;
-                    
+
                     return Some(Export {
                         name: name.to_string(),
                         kind: ExportKind::Trait,
@@ -332,7 +340,7 @@ fn extract_export_from_node(node: Node, content: &str, lines: &[&str]) -> Option
                 if let Some(name_node) = child.child_by_field_name("name") {
                     let name = name_node.utf8_text(content.as_bytes()).ok()?;
                     let line = name_node.start_position().row + 1;
-                    
+
                     return Some(Export {
                         name: name.to_string(),
                         kind: ExportKind::Enum,
@@ -345,22 +353,21 @@ fn extract_export_from_node(node: Node, content: &str, lines: &[&str]) -> Option
             _ => {}
         }
     }
-    
+
     None
 }
 
 /// Extract import info from an import_statement node
 fn extract_import_from_node(node: Node, content: &str) -> Option<Import> {
     let mut cursor = node.walk();
-    
+
     for child in node.children(&mut cursor) {
         if child.kind() == "string" || child.kind().contains("string") {
             let source_raw = child.utf8_text(content.as_bytes()).ok()?;
             let source = source_raw.trim_matches(|c| c == '"' || c == '\'' || c == '`');
-            
-            let is_external = !source.starts_with('.')
-                && !source.starts_with('/')
-                && !source.starts_with("@/");
+
+            let is_external =
+                !source.starts_with('.') && !source.starts_with('/') && !source.starts_with("@/");
 
             return Some(Import {
                 source: source.to_string(),
@@ -369,7 +376,7 @@ fn extract_import_from_node(node: Node, content: &str) -> Option<Import> {
             });
         }
     }
-    
+
     None
 }
 
@@ -534,7 +541,7 @@ export const MY_CONST = 42;
 "#;
         let result = parse_js_ts(content, Language::TypeScript).unwrap();
         assert!(result.exports.len() >= 2); // At least function and class
-        
+
         let names: Vec<&str> = result.exports.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"greet") || names.contains(&"MyClass"));
     }

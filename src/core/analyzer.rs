@@ -232,13 +232,13 @@ pub async fn analyze_streaming(
     // Process in batches for better progress reporting
     for (batch_idx, batch) in remaining.chunks(parallelism).enumerate() {
         let batch_start = batch_idx * parallelism;
-        
+
         let mut handles = Vec::new();
 
         for (idx, file) in batch.iter().enumerate() {
             let file_idx = batch_start + idx + 1 + completed.len();
             let total = total_files + completed.len();
-            
+
             info!("[{}/{}] Analyzing: {}", file_idx, total, file.path);
 
             let semaphore = Arc::clone(&semaphore);
@@ -284,20 +284,30 @@ pub async fn analyze_streaming(
 
                 // Get LLM analysis (skip very large files)
                 let (summary, has_deep) = if content.len() > 100_000 {
-                    warn!("Skipping LLM analysis for {} (file too large: {} bytes)", file_path, content.len());
+                    warn!(
+                        "Skipping LLM analysis for {} (file too large: {} bytes)",
+                        file_path,
+                        content.len()
+                    );
                     (
-                        format!("{:?} file with {} exports (too large for LLM)", file_language, parse_result.exports.len()),
+                        format!(
+                            "{:?} file with {} exports (too large for LLM)",
+                            file_language,
+                            parse_result.exports.len()
+                        ),
                         false,
                     )
                 } else {
-                    match analyze_module_with_llm_retry(&file_path, &content, &static_context, 3).await {
+                    match analyze_module_with_llm_retry(&file_path, &content, &static_context, 3)
+                        .await
+                    {
                         Ok(deep) => {
                             let summary = deep.lines().next().unwrap_or("").to_string();
-                            
+
                             // Write module markdown immediately
                             let safe_name = file_path.replace(['/', '.'], "_");
                             let module_path = modules_dir.join(format!("{}.md", safe_name));
-                            
+
                             if let Err(e) = write_module_markdown(
                                 &module_path,
                                 &file_path,
@@ -317,7 +327,7 @@ pub async fn analyze_streaming(
                         }
                         Err(e) => {
                             warn!("LLM analysis failed for {}: {}", file_path, e);
-                            
+
                             // Still write static analysis
                             let safe_name = file_path.replace(['/', '.'], "_");
                             let module_path = modules_dir.join(format!("{}.md", safe_name));
@@ -331,7 +341,11 @@ pub async fn analyze_streaming(
                             let _ = save_progress(&output_path, &file_path);
 
                             (
-                                format!("{:?} file with {} exports", file_language, parse_result.exports.len()),
+                                format!(
+                                    "{:?} file with {} exports",
+                                    file_language,
+                                    parse_result.exports.len()
+                                ),
                                 false,
                             )
                         }
@@ -543,7 +557,11 @@ fn build_static_context_from_parse(path: &str, parse_result: &parser::ParseResul
 }
 
 /// Analyze a single module with LLM
-async fn analyze_module_with_llm(path: &str, content: &str, static_context: &str) -> Result<String> {
+async fn analyze_module_with_llm(
+    path: &str,
+    content: &str,
+    static_context: &str,
+) -> Result<String> {
     let filename = std::path::Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
