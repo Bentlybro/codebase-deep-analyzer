@@ -1,5 +1,5 @@
 use anyhow::Result;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use tracing::{debug, info};
 
@@ -19,16 +19,21 @@ pub struct AnalyzeArgs {
 
 pub async fn run(args: AnalyzeArgs) -> Result<()> {
     let path = Path::new(&args.path).canonicalize()?;
+    let output_path = Path::new(&args.output);
+    
     info!("Analyzing codebase at: {}", path.display());
+    info!("Output directory: {}", output_path.display());
 
-    // Set up progress bars
-    let multi_progress = MultiProgress::new();
+    // Create output directory
+    std::fs::create_dir_all(output_path)?;
+
+    // Set up progress bar
     let spinner_style = ProgressStyle::default_spinner()
         .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ")
         .template("{prefix:.bold.dim} {spinner} {wide_msg}")?;
 
     // Phase 1: Discovery
-    let discovery_pb = multi_progress.add(ProgressBar::new_spinner());
+    let discovery_pb = ProgressBar::new_spinner();
     discovery_pb.set_style(spinner_style.clone());
     discovery_pb.set_prefix("[1/4]");
     discovery_pb.set_message("Discovering files...");
@@ -45,7 +50,7 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
     ));
 
     // Phase 2: Module Analysis
-    let analysis_pb = multi_progress.add(ProgressBar::new_spinner());
+    let analysis_pb = ProgressBar::new_spinner();
     analysis_pb.set_style(spinner_style.clone());
     analysis_pb.set_prefix("[2/4]");
 
@@ -64,17 +69,24 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
 
         result
     } else {
-        analysis_pb.set_message(format!("Analyzing modules with {} LLM...", args.provider));
+        analysis_pb.set_message(format!(
+            "Analyzing modules with {} LLM (streaming to disk)...",
+            args.provider
+        ));
         analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         let provider = crate::llm::get_provider(&args.provider, args.model.as_deref())?;
-        let result = analyzer::analyze(&inventory, provider.as_ref(), args.parallelism).await?;
+        
+        // Use streaming analysis - writes each module to disk immediately
+        let result = analyzer::analyze_streaming(
+            &inventory,
+            provider.as_ref(),
+            output_path,
+            args.parallelism,
+        )
+        .await?;
 
-        let llm_count = result
-            .modules
-            .iter()
-            .filter(|m| m.deep_analysis.is_some())
-            .count();
+        let llm_count = result.modules.iter().filter(|m| m.has_deep_analysis).count();
         analysis_pb.finish_with_message(format!(
             "Analyzed {} modules ({} with LLM), found {} exports",
             result.modules.len(),
@@ -86,7 +98,7 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
     };
 
     // Phase 3: Cross-reference
-    let crossref_pb = multi_progress.add(ProgressBar::new_spinner());
+    let crossref_pb = ProgressBar::new_spinner();
     crossref_pb.set_style(spinner_style.clone());
     crossref_pb.set_prefix("[3/4]");
     crossref_pb.set_message("Cross-referencing...");
@@ -112,14 +124,13 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
         arch_status
     ));
 
-    // Phase 4: Output
-    let output_pb = multi_progress.add(ProgressBar::new_spinner());
+    // Phase 4: Output (README + gaps, modules already written)
+    let output_pb = ProgressBar::new_spinner();
     output_pb.set_style(spinner_style);
     output_pb.set_prefix("[4/4]");
-    output_pb.set_message("Generating documentation...");
+    output_pb.set_message("Generating index and gaps...");
     output_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let output_path = Path::new(&args.output);
     output::generate(&analysis, &crossref, output_path, args.format)?;
 
     output_pb.finish_with_message(format!("Output written to {}", output_path.display()));

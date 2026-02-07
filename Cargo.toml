@@ -53,6 +53,9 @@ async-trait = "0.1"
 # Config file support
 directories = "6"
 toml = "0.8"
+
+# Memory management
+libc = "0.2"
 tree-sitter-rust = "0.24.0"
 streaming-iterator = "0.1.9"
 

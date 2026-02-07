@@ -1,13 +1,15 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::Path;
 use tracing::{debug, info, warn};
 
-use super::discovery::{FileInventory, Language};
+use super::discovery::{FileInventory, Language, SourceFile};
 use super::parser;
 use crate::llm::{LlmConfig, LlmProvider, Message, Role};
 
-/// Result of analyzing a codebase
+/// Result of analyzing a codebase - lightweight version for cross-referencing
 #[derive(Debug, Default)]
 pub struct Analysis {
     pub modules: Vec<ModuleAnalysis>,
@@ -28,8 +30,8 @@ pub struct ModuleAnalysis {
     pub imports: Vec<Import>,
     /// Brief summary of what this module does
     pub summary: String,
-    /// Detailed LLM-generated analysis (if available)
-    pub deep_analysis: Option<String>,
+    /// Whether deep analysis was written to disk
+    pub has_deep_analysis: bool,
 }
 
 /// An exported function, class, or type
@@ -157,75 +159,229 @@ pub async fn analyze_static(inventory: &FileInventory) -> Result<Analysis> {
             exports: parse_result.exports,
             imports: parse_result.imports,
             summary,
-            deep_analysis: None,
+            has_deep_analysis: false,
         });
     }
 
     Ok(analysis)
 }
 
-/// Run full analysis with LLM assistance
-pub async fn analyze(
+/// Run full analysis with LLM assistance - streams output to disk
+pub async fn analyze_streaming(
     inventory: &FileInventory,
     provider: &dyn LlmProvider,
-    parallelism: usize,
+    output_path: &Path,
+    _parallelism: usize,
 ) -> Result<Analysis> {
     info!(
-        "Running LLM-assisted analysis on {} source files (parallelism: {})",
-        inventory.source_files.len(),
-        parallelism
+        "Running streaming LLM analysis on {} source files",
+        inventory.source_files.len()
     );
 
-    // First, run static analysis to get the structure
-    let mut analysis = analyze_static(inventory).await?;
+    // Create modules directory upfront
+    let modules_dir = output_path.join("modules");
+    fs::create_dir_all(&modules_dir)?;
 
-    // Now enhance each module with LLM analysis
-    for module in &mut analysis.modules {
-        // Read the source file
-        let content = match fs::read_to_string(&module.path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to read {} for LLM analysis: {}", module.path, e);
-                continue;
-            }
-        };
+    let mut analysis = Analysis::default();
+    let total_files = inventory.source_files.len();
 
-        // Skip very large files (>50KB) to avoid token limits
-        if content.len() > 50_000 {
-            warn!("Skipping LLM analysis for {} (file too large)", module.path);
-            continue;
-        }
+    for (idx, file) in inventory.source_files.iter().enumerate() {
+        info!("[{}/{}] Analyzing: {}", idx + 1, total_files, file.path);
 
-        // Build context from static analysis
-        let static_context = build_static_context(module);
+        // Analyze single file and stream to disk
+        let module = analyze_single_file_streaming(file, provider, &modules_dir).await?;
+        analysis.modules.push(module);
 
-        // Generate LLM analysis
-        match analyze_module_with_llm(provider, &module.path, &content, &static_context).await {
-            Ok(deep) => {
-                module.deep_analysis = Some(deep.clone());
-                // Update summary with first line of deep analysis
-                if let Some(first_line) = deep.lines().next() {
-                    module.summary = first_line.to_string();
-                }
-            }
-            Err(e) => {
-                warn!("LLM analysis failed for {}: {}", module.path, e);
-            }
+        // Memory hint to the allocator
+        #[cfg(unix)]
+        unsafe {
+            libc::malloc_trim(0);
         }
     }
 
     Ok(analysis)
 }
 
-/// Build a context string from static analysis results
-fn build_static_context(module: &ModuleAnalysis) -> String {
+/// Analyze a single file and write output immediately
+async fn analyze_single_file_streaming(
+    file: &SourceFile,
+    provider: &dyn LlmProvider,
+    modules_dir: &Path,
+) -> Result<ModuleAnalysis> {
+    // Read file content
+    let content = match fs::read_to_string(&file.path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to read {}: {}", file.path, e);
+            return Ok(ModuleAnalysis {
+                path: file.path.clone(),
+                language: file.language,
+                exports: vec![],
+                imports: vec![],
+                summary: format!("Failed to read: {}", e),
+                has_deep_analysis: false,
+            });
+        }
+    };
+
+    // Parse with tree-sitter
+    let parse_result = match parser::parse_file(&content, file.language) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to parse {}: {}", file.path, e);
+            parser::ParseResult {
+                exports: vec![],
+                imports: vec![],
+            }
+        }
+    };
+
+    // Build static context
+    let static_context = build_static_context_from_parse(&file.path, &parse_result);
+
+    // Get LLM analysis (skip very large files)
+    let (summary, deep_analysis) = if content.len() > 50_000 {
+        warn!("Skipping LLM analysis for {} (file too large)", file.path);
+        (
+            format!("{:?} file (too large for LLM analysis)", file.language),
+            None,
+        )
+    } else {
+        match analyze_module_with_llm(provider, &file.path, &content, &static_context).await {
+            Ok(deep) => {
+                let summary = deep.lines().next().unwrap_or("").to_string();
+                (summary, Some(deep))
+            }
+            Err(e) => {
+                warn!("LLM analysis failed for {}: {}", file.path, e);
+                (
+                    format!("{:?} file with {} exports", file.language, parse_result.exports.len()),
+                    None,
+                )
+            }
+        }
+    };
+
+    // Write module markdown immediately
+    let safe_name = file.path.replace(['/', '.'], "_");
+    let module_path = modules_dir.join(format!("{}.md", safe_name));
+    
+    write_module_markdown(
+        &module_path,
+        &file.path,
+        file.language,
+        &parse_result,
+        deep_analysis.as_deref(),
+    )?;
+
+    // Return lightweight analysis (no deep_analysis in memory)
+    Ok(ModuleAnalysis {
+        path: file.path.clone(),
+        language: file.language,
+        exports: parse_result.exports,
+        imports: parse_result.imports,
+        summary,
+        has_deep_analysis: deep_analysis.is_some(),
+    })
+}
+
+/// Write module markdown to disk immediately
+fn write_module_markdown(
+    path: &Path,
+    file_path: &str,
+    language: Language,
+    parse_result: &parser::ParseResult,
+    deep_analysis: Option<&str>,
+) -> Result<()> {
+    let mut file = File::create(path)?;
+    
+    let module_name = Path::new(file_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+
+    writeln!(file, "# {}\n", module_name)?;
+    writeln!(file, "**Path:** `{}`\n", file_path)?;
+    writeln!(file, "**Language:** {:?}\n", language)?;
+
+    // Deep analysis (if available)
+    if let Some(deep) = deep_analysis {
+        writeln!(file, "## Analysis\n")?;
+        writeln!(file, "{}\n", deep)?;
+    }
+
+    // Exports table
+    if !parse_result.exports.is_empty() {
+        writeln!(file, "## Exports\n")?;
+        writeln!(file, "| Name | Kind | Line | Description |")?;
+        writeln!(file, "|------|------|------|-------------|")?;
+
+        for export in &parse_result.exports {
+            let desc = if export.description.len() > 50 {
+                format!("{}...", &export.description[..47])
+            } else {
+                export.description.clone()
+            };
+            writeln!(
+                file,
+                "| `{}` | {} | {} | {} |",
+                export.name, export.kind, export.line_number, desc
+            )?;
+        }
+
+        // Detailed exports
+        writeln!(file, "\n## Export Details\n")?;
+
+        for export in &parse_result.exports {
+            writeln!(file, "### `{}`\n", export.name)?;
+            writeln!(file, "**Kind:** {} | **Line:** {}\n", export.kind, export.line_number)?;
+
+            if let Some(sig) = &export.signature {
+                writeln!(file, "```rust\n{}\n```\n", sig)?;
+            }
+
+            if !export.description.is_empty() {
+                writeln!(file, "{}\n", export.description)?;
+            }
+        }
+    }
+
+    // Imports
+    if !parse_result.imports.is_empty() {
+        writeln!(file, "## Dependencies\n")?;
+
+        let external: Vec<_> = parse_result.imports.iter().filter(|i| i.is_external).collect();
+        let internal: Vec<_> = parse_result.imports.iter().filter(|i| !i.is_external).collect();
+
+        if !external.is_empty() {
+            writeln!(file, "### External\n")?;
+            for import in external {
+                writeln!(file, "- `{}`", import.source)?;
+            }
+            writeln!(file)?;
+        }
+
+        if !internal.is_empty() {
+            writeln!(file, "### Internal\n")?;
+            for import in internal {
+                writeln!(file, "- `{}`", import.source)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Build context from parse results
+fn build_static_context_from_parse(path: &str, parse_result: &parser::ParseResult) -> String {
     let mut ctx = String::new();
 
+    ctx.push_str(&format!("## File: {}\n\n", path));
     ctx.push_str("## Static Analysis Results\n\n");
 
-    if !module.exports.is_empty() {
+    if !parse_result.exports.is_empty() {
         ctx.push_str("### Exports\n");
-        for export in &module.exports {
+        for export in &parse_result.exports {
             ctx.push_str(&format!("- `{}` ({})", export.name, export.kind));
             if let Some(sig) = &export.signature {
                 ctx.push_str(&format!(": `{}`", sig));
@@ -238,14 +394,10 @@ fn build_static_context(module: &ModuleAnalysis) -> String {
         ctx.push('\n');
     }
 
-    if !module.imports.is_empty() {
+    if !parse_result.imports.is_empty() {
         ctx.push_str("### Dependencies\n");
-        for import in &module.imports {
-            let ext = if import.is_external {
-                " (external)"
-            } else {
-                ""
-            };
+        for import in &parse_result.imports {
+            let ext = if import.is_external { " (external)" } else { "" };
             ctx.push_str(&format!("- `{}`{}\n", import.source, ext));
         }
         ctx.push('\n');
@@ -276,7 +428,7 @@ For each module, provide:
 5. **Usage**: How other code would use this module
 
 Be concise but thorough. Focus on INTENT and BEHAVIOR, not just listing code.
-Output in markdown format."#;
+Output in markdown format. Keep response under 2000 tokens."#;
 
     let user_prompt = format!(
         r#"Analyze this source file: `{}`
@@ -289,7 +441,7 @@ Output in markdown format."#;
 {}
 ```
 
-Provide a deep analysis of this module. Focus on what it does, how it works, and how it fits into the larger codebase."#,
+Provide a deep analysis of this module."#,
         filename, static_context, content
     );
 
@@ -317,7 +469,7 @@ pub async fn cross_reference(analysis: &Analysis) -> Result<CrossReference> {
     info!("Cross-referencing {} modules", analysis.modules.len());
 
     let mut crossref = CrossReference::default();
-    let mut all_exports: HashMap<String, String> = HashMap::new(); // name -> path
+    let mut all_exports: HashMap<String, String> = HashMap::new();
     let mut used_exports: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut external_deps: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -336,7 +488,6 @@ pub async fn cross_reference(analysis: &Analysis) -> Result<CrossReference> {
             if import.is_external {
                 external_deps.insert(import.source.clone());
             } else {
-                // Try to find the source module
                 for item in &import.items {
                     if all_exports.contains_key(item) {
                         deps.push(all_exports[item].clone());
@@ -351,26 +502,22 @@ pub async fn cross_reference(analysis: &Analysis) -> Result<CrossReference> {
         crossref.dependencies.insert(module.path.clone(), deps);
     }
 
-    // Find gaps: exports not used anywhere
+    // Find gaps
     for module in &analysis.modules {
         for export in &module.exports {
-            // Skip main and test functions
             if export.name == "main" || export.name.contains("test") {
                 continue;
             }
 
-            if !used_exports.contains(&export.name) {
-                // Check if it has documentation
-                if export.description.is_empty() {
-                    crossref.gaps.push(Gap {
-                        kind: GapKind::MissingDocumentation,
-                        description: format!(
-                            "Public {} `{}` has no documentation",
-                            export.kind, export.name
-                        ),
-                        location: Some(format!("{}:{}", module.path, export.line_number)),
-                    });
-                }
+            if !used_exports.contains(&export.name) && export.description.is_empty() {
+                crossref.gaps.push(Gap {
+                    kind: GapKind::MissingDocumentation,
+                    description: format!(
+                        "Public {} `{}` has no documentation",
+                        export.kind, export.name
+                    ),
+                    location: Some(format!("{}:{}", module.path, export.line_number)),
+                });
             }
         }
     }
@@ -386,7 +533,6 @@ pub async fn cross_reference_with_llm(
     analysis: &Analysis,
     provider: &dyn LlmProvider,
 ) -> Result<CrossReference> {
-    // First do static cross-reference
     let mut crossref = cross_reference(analysis).await?;
 
     // Build a summary of all modules for the LLM
@@ -398,14 +544,7 @@ pub async fn cross_reference_with_llm(
             .unwrap_or(&module.path);
 
         modules_summary.push_str(&format!("### {}\n", filename));
-        if let Some(deep) = &module.deep_analysis {
-            // Just first paragraph
-            if let Some(para) = deep.split("\n\n").next() {
-                modules_summary.push_str(para);
-            }
-        } else {
-            modules_summary.push_str(&module.summary);
-        }
+        modules_summary.push_str(&module.summary);
         modules_summary.push_str("\n\n");
     }
 
@@ -422,11 +561,7 @@ Include:
 Be concise. Write for developers who need to understand the codebase quickly."#;
 
     let user_prompt = format!(
-        r#"Here are the analyzed modules:
-
-{}
-
-Generate an architecture overview for this codebase."#,
+        "Here are the analyzed modules:\n\n{}\n\nGenerate an architecture overview.",
         modules_summary
     );
 
@@ -478,7 +613,7 @@ mod tests {
                     }],
                     imports: vec![],
                     summary: "".into(),
-                    deep_analysis: None,
+                    has_deep_analysis: false,
                 },
                 ModuleAnalysis {
                     path: "b.rs".into(),
@@ -501,7 +636,7 @@ mod tests {
                     ],
                     imports: vec![],
                     summary: "".into(),
-                    deep_analysis: None,
+                    has_deep_analysis: false,
                 },
             ],
         };
@@ -514,34 +649,5 @@ mod tests {
         assert_eq!(format!("{}", ExportKind::Function), "fn");
         assert_eq!(format!("{}", ExportKind::Struct), "struct");
         assert_eq!(format!("{}", ExportKind::Trait), "trait");
-    }
-
-    #[test]
-    fn test_build_static_context() {
-        let module = ModuleAnalysis {
-            path: "test.rs".into(),
-            language: Language::Rust,
-            exports: vec![Export {
-                name: "test_fn".into(),
-                kind: ExportKind::Function,
-                signature: Some("pub fn test_fn()".into()),
-                description: "A test function".into(),
-                line_number: 1,
-            }],
-            imports: vec![Import {
-                source: "std".into(),
-                items: vec!["fs".into()],
-                is_external: true,
-            }],
-            summary: "".into(),
-            deep_analysis: None,
-        };
-
-        let ctx = build_static_context(&module);
-        assert!(ctx.contains("test_fn"));
-        assert!(ctx.contains("pub fn test_fn()"));
-        assert!(ctx.contains("A test function"));
-        assert!(ctx.contains("std"));
-        assert!(ctx.contains("(external)"));
     }
 }

@@ -20,7 +20,7 @@ struct JsonModule {
     path: String,
     language: String,
     summary: String,
-    deep_analysis: Option<String>,
+    has_deep_analysis: bool,
     exports: Vec<JsonExport>,
     imports: Vec<JsonImport>,
 }
@@ -74,7 +74,7 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
     let llm_analyzed = analysis
         .modules
         .iter()
-        .filter(|m| m.deep_analysis.is_some())
+        .filter(|m| m.has_deep_analysis)
         .count();
 
     let output = JsonOutput {
@@ -87,7 +87,7 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
                 path: m.path.clone(),
                 language: format!("{:?}", m.language),
                 summary: m.summary.clone(),
-                deep_analysis: m.deep_analysis.clone(),
+                has_deep_analysis: m.has_deep_analysis,
                 exports: m
                     .exports
                     .iter()

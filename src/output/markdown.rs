@@ -1,16 +1,21 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
 use crate::core::analyzer::GapKind;
 use crate::core::{Analysis, CrossReference};
 
+/// Generate README and gaps files (modules may already exist from streaming)
 pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Path) -> Result<()> {
-    // Generate index.md
+    // Ensure modules directory exists
+    let modules_dir = output_path.join("modules");
+    fs::create_dir_all(&modules_dir)?;
+
+    // Generate README.md
     let index_path = output_path.join("README.md");
-    let mut index = fs::File::create(&index_path)?;
+    let mut index = File::create(&index_path)?;
 
     writeln!(index, "# Codebase Analysis\n")?;
     writeln!(
@@ -36,6 +41,11 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
         crossref.external_deps.len()
     )?;
     writeln!(index, "| Potential gaps | {} |", crossref.gaps.len())?;
+
+    let llm_count = analysis.modules.iter().filter(|m| m.has_deep_analysis).count();
+    if llm_count > 0 {
+        writeln!(index, "| LLM-analyzed modules | {} |", llm_count)?;
+    }
 
     // External dependencies
     if !crossref.external_deps.is_empty() {
@@ -76,7 +86,9 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
             let safe_name = module.path.replace(['/', '.'], "_");
             let export_count = module.exports.len();
 
-            if export_count > 0 || module.deep_analysis.is_some() {
+            // Check if module file exists (from streaming)
+            let module_file = modules_dir.join(format!("{}.md", safe_name));
+            if module_file.exists() || export_count > 0 {
                 writeln!(
                     index,
                     "- [{}](modules/{}.md) — {}",
@@ -95,18 +107,21 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
         writeln!(index, "See [gaps.md](gaps.md) for details.\n")?;
     }
 
-    // Generate modules directory
-    let modules_dir = output_path.join("modules");
-    fs::create_dir_all(&modules_dir)?;
-
+    // Write module files only if they don't exist (for static-only mode)
     for module in &analysis.modules {
-        if module.exports.is_empty() && module.deep_analysis.is_none() {
+        if module.exports.is_empty() && !module.has_deep_analysis {
             continue;
         }
 
         let safe_name = module.path.replace(['/', '.'], "_");
         let module_path = modules_dir.join(format!("{}.md", safe_name));
-        let mut file = fs::File::create(&module_path)?;
+
+        // Skip if already written by streaming
+        if module_path.exists() {
+            continue;
+        }
+
+        let mut file = File::create(&module_path)?;
 
         let module_name = Path::new(&module.path)
             .file_stem()
@@ -116,14 +131,7 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
         writeln!(file, "# {}\n", module_name)?;
         writeln!(file, "**Path:** `{}`\n", module.path)?;
         writeln!(file, "**Language:** {:?}\n", module.language)?;
-
-        // Deep analysis (if available)
-        if let Some(deep) = &module.deep_analysis {
-            writeln!(file, "## Analysis\n")?;
-            writeln!(file, "{}\n", deep)?;
-        } else {
-            writeln!(file, "{}\n", module.summary)?;
-        }
+        writeln!(file, "{}\n", module.summary)?;
 
         // Exports table
         if !module.exports.is_empty() {
@@ -144,7 +152,6 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
                 )?;
             }
 
-            // Detailed exports
             writeln!(file, "\n## Export Details\n")?;
 
             for export in &module.exports {
@@ -192,7 +199,7 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
     // Generate gaps.md if there are gaps
     if !crossref.gaps.is_empty() {
         let gaps_path = output_path.join("gaps.md");
-        let mut gaps = fs::File::create(&gaps_path)?;
+        let mut gaps = File::create(&gaps_path)?;
 
         writeln!(gaps, "# Potential Gaps\n")?;
         writeln!(gaps, "Issues identified during analysis:\n")?;
