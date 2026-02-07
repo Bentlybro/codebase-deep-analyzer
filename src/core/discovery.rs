@@ -6,6 +6,7 @@ use tracing::debug;
 /// Categorized inventory of files in a codebase
 #[derive(Debug, Default)]
 pub struct FileInventory {
+    #[allow(dead_code)]
     pub root: String,
     pub source_files: Vec<SourceFile>,
     pub config_files: Vec<String>,
@@ -17,6 +18,7 @@ pub struct FileInventory {
 pub struct SourceFile {
     pub path: String,
     pub language: Language,
+    #[allow(dead_code)]
     pub size: u64,
 }
 
@@ -58,7 +60,10 @@ impl Language {
 
 impl FileInventory {
     pub fn total_files(&self) -> usize {
-        self.source_files.len() + self.config_files.len() + self.doc_files.len() + self.test_files.len()
+        self.source_files.len()
+            + self.config_files.len()
+            + self.doc_files.len()
+            + self.test_files.len()
     }
 }
 
@@ -84,7 +89,7 @@ pub async fn discover(path: &Path, module: Option<&str>) -> Result<FileInventory
 
     for entry in walker.flatten() {
         let path = entry.path();
-        
+
         if !path.is_file() {
             continue;
         }
@@ -125,61 +130,120 @@ pub async fn discover(path: &Path, module: Option<&str>) -> Result<FileInventory
 fn is_binary_extension(ext: &str) -> bool {
     matches!(
         ext.to_lowercase().as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "ico" | "webp" | "svg" |
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" |
-        "zip" | "tar" | "gz" | "rar" | "7z" |
-        "exe" | "dll" | "so" | "dylib" | "o" | "a" |
-        "wasm" | "class" | "pyc" | "pyo" |
-        "mp3" | "mp4" | "wav" | "avi" | "mov" |
-        "ttf" | "otf" | "woff" | "woff2" | "eot"
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "ico"
+            | "webp"
+            | "svg"
+            | "pdf"
+            | "doc"
+            | "docx"
+            | "xls"
+            | "xlsx"
+            | "zip"
+            | "tar"
+            | "gz"
+            | "rar"
+            | "7z"
+            | "exe"
+            | "dll"
+            | "so"
+            | "dylib"
+            | "o"
+            | "a"
+            | "wasm"
+            | "class"
+            | "pyc"
+            | "pyo"
+            | "mp3"
+            | "mp4"
+            | "wav"
+            | "avi"
+            | "mov"
+            | "ttf"
+            | "otf"
+            | "woff"
+            | "woff2"
+            | "eot"
     )
 }
 
 fn is_config_file(name: &str, ext: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
-        "package.json" | "cargo.toml" | "pyproject.toml" | "go.mod" |
-        "tsconfig.json" | "webpack.config.js" | "vite.config.ts" |
-        ".eslintrc" | ".prettierrc" | "dockerfile" | "docker-compose.yml" |
-        "makefile" | "justfile" | ".env.example"
-    ) || matches!(
-        ext.to_lowercase().as_str(),
-        "toml" | "yaml" | "yml"
-    ) && !name.contains("test")
+        "package.json"
+            | "cargo.toml"
+            | "pyproject.toml"
+            | "go.mod"
+            | "tsconfig.json"
+            | "webpack.config.js"
+            | "vite.config.ts"
+            | ".eslintrc"
+            | ".prettierrc"
+            | "dockerfile"
+            | "docker-compose.yml"
+            | "makefile"
+            | "justfile"
+            | ".env.example"
+    ) || matches!(ext.to_lowercase().as_str(), "toml" | "yaml" | "yml") && !name.contains("test")
 }
 
 fn is_doc_file(name: &str, ext: &str) -> bool {
-    matches!(
-        ext.to_lowercase().as_str(),
-        "md" | "rst" | "txt" | "adoc"
-    ) || matches!(
-        name.to_lowercase().as_str(),
-        "readme" | "changelog" | "contributing" | "license" | "authors"
-    )
+    matches!(ext.to_lowercase().as_str(), "md" | "rst" | "txt" | "adoc")
+        || matches!(
+            name.to_lowercase().as_str(),
+            "readme" | "changelog" | "contributing" | "license" | "authors"
+        )
 }
 
 fn is_test_file(path: &str, name: &str) -> bool {
     let path_lower = path.to_lowercase();
     let name_lower = name.to_lowercase();
-    
-    path_lower.contains("/test/") ||
-    path_lower.contains("/tests/") ||
-    path_lower.contains("/__tests__/") ||
-    path_lower.contains("/spec/") ||
-    name_lower.contains("_test.") ||
-    name_lower.contains(".test.") ||
-    name_lower.contains("_spec.") ||
-    name_lower.contains(".spec.")
+
+    path_lower.contains("/test/")
+        || path_lower.contains("/tests/")
+        || path_lower.contains("/__tests__/")
+        || path_lower.contains("/spec/")
+        || name_lower.contains("_test.")
+        || name_lower.contains(".test.")
+        || name_lower.contains("_spec.")
+        || name_lower.contains(".spec.")
 }
 
 fn is_source_file(ext: &str) -> bool {
     matches!(
         ext.to_lowercase().as_str(),
-        "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" |
-        "py" | "go" | "java" | "cs" | "cpp" | "cc" | "cxx" | "c" | "h" | "hpp" |
-        "rb" | "php" | "swift" | "kt" | "scala" | "clj" |
-        "sh" | "bash" | "zsh" | "ps1" |
-        "sql" | "graphql" | "proto"
+        "rs" | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "py"
+            | "go"
+            | "java"
+            | "cs"
+            | "cpp"
+            | "cc"
+            | "cxx"
+            | "c"
+            | "h"
+            | "hpp"
+            | "rb"
+            | "php"
+            | "swift"
+            | "kt"
+            | "scala"
+            | "clj"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "ps1"
+            | "sql"
+            | "graphql"
+            | "proto"
     )
 }
 

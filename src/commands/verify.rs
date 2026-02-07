@@ -8,7 +8,7 @@ pub struct VerifyArgs {
 
 pub async fn run(args: VerifyArgs) -> Result<()> {
     info!("Verifying analysis at: {}", args.path);
-    
+
     if args.run_commands {
         info!("Running command verification (--run-commands enabled)");
     }

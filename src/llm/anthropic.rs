@@ -19,7 +19,7 @@ impl AnthropicProvider {
     pub fn new(model: Option<&str>) -> Result<Self> {
         let api_key = env::var("ANTHROPIC_API_KEY")
             .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
-        
+
         Ok(Self {
             client: Client::new(),
             api_key,
@@ -59,11 +59,11 @@ impl LlmProvider for AnthropicProvider {
     fn name(&self) -> &str {
         "anthropic"
     }
-    
+
     async fn complete(&self, messages: Vec<Message>, config: LlmConfig) -> Result<String> {
         let mut system_prompt = None;
         let mut api_messages = Vec::new();
-        
+
         for msg in messages {
             match msg.role {
                 Role::System => {
@@ -83,7 +83,7 @@ impl LlmProvider for AnthropicProvider {
                 }
             }
         }
-        
+
         let request = ApiRequest {
             model: self.model.clone(),
             max_tokens: config.max_tokens,
@@ -91,8 +91,9 @@ impl LlmProvider for AnthropicProvider {
             system: system_prompt,
             temperature: config.temperature,
         };
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(API_URL)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -100,15 +101,15 @@ impl LlmProvider for AnthropicProvider {
             .json(&request)
             .send()
             .await?;
-        
+
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await?;
             anyhow::bail!("Anthropic API error {}: {}", status, body);
         }
-        
+
         let api_response: ApiResponse = response.json().await?;
-        
+
         Ok(api_response
             .content
             .into_iter()

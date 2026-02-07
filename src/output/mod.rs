@@ -1,5 +1,5 @@
-mod markdown;
 mod json;
+mod markdown;
 
 use anyhow::Result;
 use clap::ValueEnum;
@@ -22,7 +22,7 @@ pub fn generate(
     format: Format,
 ) -> Result<()> {
     std::fs::create_dir_all(output_path)?;
-    
+
     match format {
         Format::Markdown => markdown::generate(analysis, crossref, output_path),
         Format::Json => json::generate(analysis, crossref, output_path),

@@ -1,13 +1,13 @@
 mod anthropic;
-mod openai;
 mod ollama;
+mod openai;
 
 use anyhow::Result;
 pub use async_trait::async_trait;
 
 pub use anthropic::AnthropicProvider;
-pub use openai::OpenAiProvider;
 pub use ollama::OllamaProvider;
+pub use openai::OpenAiProvider;
 
 /// Message for LLM conversation
 #[derive(Debug, Clone)]
@@ -17,6 +17,7 @@ pub struct Message {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum Role {
     System,
     User,
@@ -43,8 +44,9 @@ impl Default for LlmConfig {
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Get the provider name
+    #[allow(dead_code)]
     fn name(&self) -> &str;
-    
+
     /// Send a message and get a response
     async fn complete(&self, messages: Vec<Message>, config: LlmConfig) -> Result<String>;
 }
@@ -52,17 +54,14 @@ pub trait LlmProvider: Send + Sync {
 /// Get an LLM provider by name
 pub fn get_provider(name: &str, model: Option<&str>) -> Result<Box<dyn LlmProvider>> {
     match name.to_lowercase().as_str() {
-        "anthropic" | "claude" => {
-            Ok(Box::new(AnthropicProvider::new(model)?))
-        }
-        "openai" | "gpt" => {
-            Ok(Box::new(OpenAiProvider::new(model)?))
-        }
-        "ollama" | "local" => {
-            Ok(Box::new(OllamaProvider::new(model)?))
-        }
+        "anthropic" | "claude" => Ok(Box::new(AnthropicProvider::new(model)?)),
+        "openai" | "gpt" => Ok(Box::new(OpenAiProvider::new(model)?)),
+        "ollama" | "local" => Ok(Box::new(OllamaProvider::new(model)?)),
         _ => {
-            anyhow::bail!("Unknown LLM provider: {}. Supported: anthropic, openai, ollama", name)
+            anyhow::bail!(
+                "Unknown LLM provider: {}. Supported: anthropic, openai, ollama",
+                name
+            )
         }
     }
 }

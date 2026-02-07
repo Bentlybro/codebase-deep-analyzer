@@ -48,36 +48,40 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
     let analysis_pb = multi_progress.add(ProgressBar::new_spinner());
     analysis_pb.set_style(spinner_style.clone());
     analysis_pb.set_prefix("[2/4]");
-    
+
     let analysis = if args.static_only {
         analysis_pb.set_message("Analyzing modules (static only)...");
         analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        
+
         debug!("Running static analysis only (--static-only)");
         let result = analyzer::analyze_static(&inventory).await?;
-        
+
         analysis_pb.finish_with_message(format!(
             "Analyzed {} modules, found {} exports (static)",
             result.modules.len(),
             result.total_exports()
         ));
-        
+
         result
     } else {
         analysis_pb.set_message(format!("Analyzing modules with {} LLM...", args.provider));
         analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        
+
         let provider = crate::llm::get_provider(&args.provider, args.model.as_deref())?;
         let result = analyzer::analyze(&inventory, provider.as_ref(), args.parallelism).await?;
-        
-        let llm_count = result.modules.iter().filter(|m| m.deep_analysis.is_some()).count();
+
+        let llm_count = result
+            .modules
+            .iter()
+            .filter(|m| m.deep_analysis.is_some())
+            .count();
         analysis_pb.finish_with_message(format!(
             "Analyzed {} modules ({} with LLM), found {} exports",
             result.modules.len(),
             llm_count,
             result.total_exports()
         ));
-        
+
         result
     };
 
@@ -100,7 +104,7 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
     } else {
         ""
     };
-    
+
     crossref_pb.finish_with_message(format!(
         "Mapped {} dependencies, found {} potential gaps{}",
         crossref.dependencies.len(),

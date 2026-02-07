@@ -9,7 +9,11 @@ mod output;
 
 #[derive(Parser)]
 #[command(name = "cda")]
-#[command(author, version, about = "Codebase Deep Analyzer - Systematic codebase exploration and documentation")]
+#[command(
+    author,
+    version,
+    about = "Codebase Deep Analyzer - Systematic codebase exploration and documentation"
+)]
 #[command(propagate_version = true)]
 struct Cli {
     /// Enable verbose logging
@@ -81,14 +85,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Set up logging
-    let filter = if cli.verbose {
-        "debug"
-    } else {
-        "info"
-    };
+    let filter = if cli.verbose { "debug" } else { "info" };
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()),
+        )
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .init();
 

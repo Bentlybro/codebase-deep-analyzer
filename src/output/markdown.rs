@@ -73,7 +73,7 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown");
 
-            let safe_name = module.path.replace('/', "_").replace('.', "_");
+            let safe_name = module.path.replace(['/', '.'], "_");
             let export_count = module.exports.len();
 
             if export_count > 0 || module.deep_analysis.is_some() {
@@ -104,7 +104,7 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
             continue;
         }
 
-        let safe_name = module.path.replace('/', "_").replace('.', "_");
+        let safe_name = module.path.replace(['/', '.'], "_");
         let module_path = modules_dir.join(format!("{}.md", safe_name));
         let mut file = fs::File::create(&module_path)?;
 

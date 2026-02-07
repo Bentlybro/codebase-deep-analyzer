@@ -18,7 +18,7 @@ pub struct OllamaProvider {
 impl OllamaProvider {
     pub fn new(model: Option<&str>) -> Result<Self> {
         let base_url = env::var("OLLAMA_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
-        
+
         Ok(Self {
             client: Client::new(),
             base_url,
@@ -62,7 +62,7 @@ impl LlmProvider for OllamaProvider {
     fn name(&self) -> &str {
         "ollama"
     }
-    
+
     async fn complete(&self, messages: Vec<Message>, config: LlmConfig) -> Result<String> {
         let api_messages: Vec<ApiMessage> = messages
             .into_iter()
@@ -75,7 +75,7 @@ impl LlmProvider for OllamaProvider {
                 content: msg.content,
             })
             .collect();
-        
+
         let request = ApiRequest {
             model: self.model.clone(),
             messages: api_messages,
@@ -85,23 +85,19 @@ impl LlmProvider for OllamaProvider {
                 temperature: config.temperature,
             },
         };
-        
+
         let url = format!("{}/api/chat", self.base_url);
-        
-        let response = self.client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?;
-        
+
+        let response = self.client.post(&url).json(&request).send().await?;
+
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await?;
             anyhow::bail!("Ollama API error {}: {}", status, body);
         }
-        
+
         let api_response: ApiResponse = response.json().await?;
-        
+
         Ok(api_response.message.content)
     }
 }

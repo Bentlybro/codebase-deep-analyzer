@@ -43,6 +43,7 @@ pub struct Export {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum ExportKind {
     Function,
     Class,
@@ -98,6 +99,7 @@ pub struct Gap {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum GapKind {
     UnusedExport,
     MissingDocumentation,
@@ -239,7 +241,11 @@ fn build_static_context(module: &ModuleAnalysis) -> String {
     if !module.imports.is_empty() {
         ctx.push_str("### Dependencies\n");
         for import in &module.imports {
-            let ext = if import.is_external { " (external)" } else { "" };
+            let ext = if import.is_external {
+                " (external)"
+            } else {
+                ""
+            };
             ctx.push_str(&format!("- `{}`{}\n", import.source, ext));
         }
         ctx.push('\n');

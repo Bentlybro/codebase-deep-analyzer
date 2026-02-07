@@ -17,9 +17,9 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(model: Option<&str>) -> Result<Self> {
-        let api_key = env::var("OPENAI_API_KEY")
-            .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
-        
+        let api_key =
+            env::var("OPENAI_API_KEY").map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
+
         Ok(Self {
             client: Client::new(),
             api_key,
@@ -62,7 +62,7 @@ impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
         "openai"
     }
-    
+
     async fn complete(&self, messages: Vec<Message>, config: LlmConfig) -> Result<String> {
         let api_messages: Vec<ApiMessage> = messages
             .into_iter()
@@ -75,30 +75,31 @@ impl LlmProvider for OpenAiProvider {
                 content: msg.content,
             })
             .collect();
-        
+
         let request = ApiRequest {
             model: self.model.clone(),
             max_tokens: config.max_tokens,
             messages: api_messages,
             temperature: config.temperature,
         };
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(API_URL)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
             .await?;
-        
+
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await?;
             anyhow::bail!("OpenAI API error {}: {}", status, body);
         }
-        
+
         let api_response: ApiResponse = response.json().await?;
-        
+
         api_response
             .choices
             .first()

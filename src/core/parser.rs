@@ -176,10 +176,7 @@ fn parse_rust(content: &str) -> Result<ParseResult> {
                     let parts: Vec<&str> = path.split("::").collect();
                     let source = parts.first().unwrap_or(&"").to_string();
                     let items: Vec<String> = if parts.len() > 1 {
-                        parts[1..]
-                            .iter()
-                            .map(|s: &&str| (*s).to_string())
-                            .collect()
+                        parts[1..].iter().map(|s: &&str| (*s).to_string()).collect()
                     } else {
                         vec![]
                     };
