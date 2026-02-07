@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 
 use super::discovery::{FileInventory, Language};
 use super::parser;
-use crate::llm::LlmProvider;
+use crate::llm::{LlmConfig, LlmProvider, Message, Role};
 
 /// Result of analyzing a codebase
 #[derive(Debug, Default)]
@@ -26,7 +26,10 @@ pub struct ModuleAnalysis {
     pub language: Language,
     pub exports: Vec<Export>,
     pub imports: Vec<Import>,
+    /// Brief summary of what this module does
     pub summary: String,
+    /// Detailed LLM-generated analysis (if available)
+    pub deep_analysis: Option<String>,
 }
 
 /// An exported function, class, or type
@@ -83,6 +86,8 @@ pub struct CrossReference {
     pub gaps: Vec<Gap>,
     /// External dependencies used
     pub external_deps: Vec<String>,
+    /// LLM-generated architecture overview
+    pub architecture_overview: Option<String>,
 }
 
 #[derive(Debug)]
@@ -150,6 +155,7 @@ pub async fn analyze_static(inventory: &FileInventory) -> Result<Analysis> {
             exports: parse_result.exports,
             imports: parse_result.imports,
             summary,
+            deep_analysis: None,
         });
     }
 
@@ -159,19 +165,145 @@ pub async fn analyze_static(inventory: &FileInventory) -> Result<Analysis> {
 /// Run full analysis with LLM assistance
 pub async fn analyze(
     inventory: &FileInventory,
-    _provider: &dyn LlmProvider,
-    _parallelism: usize,
+    provider: &dyn LlmProvider,
+    parallelism: usize,
 ) -> Result<Analysis> {
     info!(
-        "Running LLM-assisted analysis on {} source files",
-        inventory.source_files.len()
+        "Running LLM-assisted analysis on {} source files (parallelism: {})",
+        inventory.source_files.len(),
+        parallelism
     );
 
-    // TODO: Implement LLM-assisted analysis
-    // For now, fall back to static analysis
-    // Future: Use LLM to generate better summaries, understand intent, etc.
+    // First, run static analysis to get the structure
+    let mut analysis = analyze_static(inventory).await?;
 
-    analyze_static(inventory).await
+    // Now enhance each module with LLM analysis
+    for module in &mut analysis.modules {
+        // Read the source file
+        let content = match fs::read_to_string(&module.path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read {} for LLM analysis: {}", module.path, e);
+                continue;
+            }
+        };
+
+        // Skip very large files (>50KB) to avoid token limits
+        if content.len() > 50_000 {
+            warn!("Skipping LLM analysis for {} (file too large)", module.path);
+            continue;
+        }
+
+        // Build context from static analysis
+        let static_context = build_static_context(module);
+
+        // Generate LLM analysis
+        match analyze_module_with_llm(provider, &module.path, &content, &static_context).await {
+            Ok(deep) => {
+                module.deep_analysis = Some(deep.clone());
+                // Update summary with first line of deep analysis
+                if let Some(first_line) = deep.lines().next() {
+                    module.summary = first_line.to_string();
+                }
+            }
+            Err(e) => {
+                warn!("LLM analysis failed for {}: {}", module.path, e);
+            }
+        }
+    }
+
+    Ok(analysis)
+}
+
+/// Build a context string from static analysis results
+fn build_static_context(module: &ModuleAnalysis) -> String {
+    let mut ctx = String::new();
+
+    ctx.push_str("## Static Analysis Results\n\n");
+
+    if !module.exports.is_empty() {
+        ctx.push_str("### Exports\n");
+        for export in &module.exports {
+            ctx.push_str(&format!("- `{}` ({})", export.name, export.kind));
+            if let Some(sig) = &export.signature {
+                ctx.push_str(&format!(": `{}`", sig));
+            }
+            if !export.description.is_empty() {
+                ctx.push_str(&format!(" — {}", export.description));
+            }
+            ctx.push('\n');
+        }
+        ctx.push('\n');
+    }
+
+    if !module.imports.is_empty() {
+        ctx.push_str("### Dependencies\n");
+        for import in &module.imports {
+            let ext = if import.is_external { " (external)" } else { "" };
+            ctx.push_str(&format!("- `{}`{}\n", import.source, ext));
+        }
+        ctx.push('\n');
+    }
+
+    ctx
+}
+
+/// Analyze a single module with LLM
+async fn analyze_module_with_llm(
+    provider: &dyn LlmProvider,
+    path: &str,
+    content: &str,
+    static_context: &str,
+) -> Result<String> {
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path);
+
+    let system_prompt = r#"You are a code analysis expert. Your job is to analyze source code and produce clear, structured documentation that helps other developers (and AI assistants) understand the codebase.
+
+For each module, provide:
+1. **Purpose**: One sentence explaining what this module does
+2. **Key Components**: Brief description of each important function/type
+3. **Data Flow**: How data moves through this module
+4. **Dependencies**: What this module relies on and why
+5. **Usage**: How other code would use this module
+
+Be concise but thorough. Focus on INTENT and BEHAVIOR, not just listing code.
+Output in markdown format."#;
+
+    let user_prompt = format!(
+        r#"Analyze this source file: `{}`
+
+{}
+
+## Source Code
+
+```
+{}
+```
+
+Provide a deep analysis of this module. Focus on what it does, how it works, and how it fits into the larger codebase."#,
+        filename, static_context, content
+    );
+
+    let messages = vec![
+        Message {
+            role: Role::System,
+            content: system_prompt.to_string(),
+        },
+        Message {
+            role: Role::User,
+            content: user_prompt,
+        },
+    ];
+
+    let config = LlmConfig {
+        max_tokens: 2048,
+        temperature: 0.0,
+    };
+
+    provider.complete(messages, config).await
 }
 
 /// Cross-reference modules to find dependencies and gaps
@@ -243,6 +375,83 @@ pub async fn cross_reference(analysis: &Analysis) -> Result<CrossReference> {
     Ok(crossref)
 }
 
+/// Cross-reference with LLM to generate architecture overview
+pub async fn cross_reference_with_llm(
+    analysis: &Analysis,
+    provider: &dyn LlmProvider,
+) -> Result<CrossReference> {
+    // First do static cross-reference
+    let mut crossref = cross_reference(analysis).await?;
+
+    // Build a summary of all modules for the LLM
+    let mut modules_summary = String::new();
+    for module in &analysis.modules {
+        let filename = std::path::Path::new(&module.path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&module.path);
+
+        modules_summary.push_str(&format!("### {}\n", filename));
+        if let Some(deep) = &module.deep_analysis {
+            // Just first paragraph
+            if let Some(para) = deep.split("\n\n").next() {
+                modules_summary.push_str(para);
+            }
+        } else {
+            modules_summary.push_str(&module.summary);
+        }
+        modules_summary.push_str("\n\n");
+    }
+
+    // Generate architecture overview
+    let system_prompt = r#"You are a software architect. Analyze the module summaries and produce a high-level architecture overview.
+
+Include:
+1. **System Purpose**: What does this codebase do overall?
+2. **Core Components**: The main modules and their roles
+3. **Data Flow**: How data moves through the system
+4. **Entry Points**: Where does execution start?
+5. **Extension Points**: Where can the system be extended?
+
+Be concise. Write for developers who need to understand the codebase quickly."#;
+
+    let user_prompt = format!(
+        r#"Here are the analyzed modules:
+
+{}
+
+Generate an architecture overview for this codebase."#,
+        modules_summary
+    );
+
+    let messages = vec![
+        Message {
+            role: Role::System,
+            content: system_prompt.to_string(),
+        },
+        Message {
+            role: Role::User,
+            content: user_prompt,
+        },
+    ];
+
+    let config = LlmConfig {
+        max_tokens: 2048,
+        temperature: 0.0,
+    };
+
+    match provider.complete(messages, config).await {
+        Ok(overview) => {
+            crossref.architecture_overview = Some(overview);
+        }
+        Err(e) => {
+            warn!("Failed to generate architecture overview: {}", e);
+        }
+    }
+
+    Ok(crossref)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +472,7 @@ mod tests {
                     }],
                     imports: vec![],
                     summary: "".into(),
+                    deep_analysis: None,
                 },
                 ModuleAnalysis {
                     path: "b.rs".into(),
@@ -285,6 +495,7 @@ mod tests {
                     ],
                     imports: vec![],
                     summary: "".into(),
+                    deep_analysis: None,
                 },
             ],
         };
@@ -297,5 +508,34 @@ mod tests {
         assert_eq!(format!("{}", ExportKind::Function), "fn");
         assert_eq!(format!("{}", ExportKind::Struct), "struct");
         assert_eq!(format!("{}", ExportKind::Trait), "trait");
+    }
+
+    #[test]
+    fn test_build_static_context() {
+        let module = ModuleAnalysis {
+            path: "test.rs".into(),
+            language: Language::Rust,
+            exports: vec![Export {
+                name: "test_fn".into(),
+                kind: ExportKind::Function,
+                signature: Some("pub fn test_fn()".into()),
+                description: "A test function".into(),
+                line_number: 1,
+            }],
+            imports: vec![Import {
+                source: "std".into(),
+                items: vec!["fs".into()],
+                is_external: true,
+            }],
+            summary: "".into(),
+            deep_analysis: None,
+        };
+
+        let ctx = build_static_context(&module);
+        assert!(ctx.contains("test_fn"));
+        assert!(ctx.contains("pub fn test_fn()"));
+        assert!(ctx.contains("A test function"));
+        assert!(ctx.contains("std"));
+        assert!(ctx.contains("(external)"));
     }
 }

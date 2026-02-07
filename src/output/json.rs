@@ -9,6 +9,7 @@ use crate::core::{Analysis, CrossReference};
 #[derive(Serialize)]
 struct JsonOutput {
     version: &'static str,
+    architecture_overview: Option<String>,
     modules: Vec<JsonModule>,
     cross_reference: JsonCrossRef,
     statistics: JsonStats,
@@ -19,6 +20,7 @@ struct JsonModule {
     path: String,
     language: String,
     summary: String,
+    deep_analysis: Option<String>,
     exports: Vec<JsonExport>,
     imports: Vec<JsonImport>,
 }
@@ -65,11 +67,19 @@ struct JsonStats {
     total_exports: usize,
     external_dependencies: usize,
     potential_gaps: usize,
+    llm_analyzed_modules: usize,
 }
 
 pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Path) -> Result<()> {
+    let llm_analyzed = analysis
+        .modules
+        .iter()
+        .filter(|m| m.deep_analysis.is_some())
+        .count();
+
     let output = JsonOutput {
         version: "1.0",
+        architecture_overview: crossref.architecture_overview.clone(),
         modules: analysis
             .modules
             .iter()
@@ -77,6 +87,7 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
                 path: m.path.clone(),
                 language: format!("{:?}", m.language),
                 summary: m.summary.clone(),
+                deep_analysis: m.deep_analysis.clone(),
                 exports: m
                     .exports
                     .iter()
@@ -141,6 +152,7 @@ pub fn generate(analysis: &Analysis, crossref: &CrossReference, output_path: &Pa
             total_exports: analysis.total_exports(),
             external_dependencies: crossref.external_deps.len(),
             potential_gaps: crossref.gaps.len(),
+            llm_analyzed_modules: llm_analyzed,
         },
     };
 

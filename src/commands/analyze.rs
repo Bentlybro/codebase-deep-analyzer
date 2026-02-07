@@ -1,9 +1,9 @@
 use anyhow::Result;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::path::Path;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
-use crate::core::{discovery, analyzer};
+use crate::core::{analyzer, discovery};
 use crate::output::{self, Format};
 
 pub struct AnalyzeArgs {
@@ -35,7 +35,7 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
     discovery_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let inventory = discovery::discover(&path, args.module.as_deref()).await?;
-    
+
     discovery_pb.finish_with_message(format!(
         "Found {} files ({} source, {} config, {} docs)",
         inventory.total_files(),
@@ -48,22 +48,38 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
     let analysis_pb = multi_progress.add(ProgressBar::new_spinner());
     analysis_pb.set_style(spinner_style.clone());
     analysis_pb.set_prefix("[2/4]");
-    analysis_pb.set_message("Analyzing modules...");
-    analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
+    
     let analysis = if args.static_only {
+        analysis_pb.set_message("Analyzing modules (static only)...");
+        analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        
         debug!("Running static analysis only (--static-only)");
-        analyzer::analyze_static(&inventory).await?
+        let result = analyzer::analyze_static(&inventory).await?;
+        
+        analysis_pb.finish_with_message(format!(
+            "Analyzed {} modules, found {} exports (static)",
+            result.modules.len(),
+            result.total_exports()
+        ));
+        
+        result
     } else {
+        analysis_pb.set_message(format!("Analyzing modules with {} LLM...", args.provider));
+        analysis_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        
         let provider = crate::llm::get_provider(&args.provider, args.model.as_deref())?;
-        analyzer::analyze(&inventory, provider.as_ref(), args.parallelism).await?
+        let result = analyzer::analyze(&inventory, provider.as_ref(), args.parallelism).await?;
+        
+        let llm_count = result.modules.iter().filter(|m| m.deep_analysis.is_some()).count();
+        analysis_pb.finish_with_message(format!(
+            "Analyzed {} modules ({} with LLM), found {} exports",
+            result.modules.len(),
+            llm_count,
+            result.total_exports()
+        ));
+        
+        result
     };
-
-    analysis_pb.finish_with_message(format!(
-        "Analyzed {} modules, found {} exports",
-        analysis.modules.len(),
-        analysis.total_exports()
-    ));
 
     // Phase 3: Cross-reference
     let crossref_pb = multi_progress.add(ProgressBar::new_spinner());
@@ -72,12 +88,24 @@ pub async fn run(args: AnalyzeArgs) -> Result<()> {
     crossref_pb.set_message("Cross-referencing...");
     crossref_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let crossref = analyzer::cross_reference(&analysis).await?;
+    let crossref = if args.static_only {
+        analyzer::cross_reference(&analysis).await?
+    } else {
+        let provider = crate::llm::get_provider(&args.provider, args.model.as_deref())?;
+        analyzer::cross_reference_with_llm(&analysis, provider.as_ref()).await?
+    };
 
+    let arch_status = if crossref.architecture_overview.is_some() {
+        " + architecture overview"
+    } else {
+        ""
+    };
+    
     crossref_pb.finish_with_message(format!(
-        "Mapped {} dependencies, found {} potential gaps",
+        "Mapped {} dependencies, found {} potential gaps{}",
         crossref.dependencies.len(),
-        crossref.gaps.len()
+        crossref.gaps.len(),
+        arch_status
     ));
 
     // Phase 4: Output
